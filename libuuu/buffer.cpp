@@ -163,6 +163,7 @@ public:
 		p->m_avaible_size = st.st_size;
 		
 		atomic_fetch_or(&p->m_dataflags, FILEBUFFER_FLAG_LOADED);
+		p->m_request_cv.notify_all();
 
 		return 0;
 	}
@@ -227,6 +228,9 @@ public:
 
 class FSNetwork : public FSBasic
 {
+protected:
+	int m_Port;
+
 public:
 	int split(const string &filename, string *outbackfile, string *outfilename, bool dir = false) override
 	{
@@ -243,6 +247,15 @@ public:
 			pos = filename.find('/', 1 + strlen(m_Prefix));
 
 			*outbackfile = filename.substr(1 + strlen(m_Prefix), pos - 1 - strlen(m_Prefix));
+
+			size_t cpos;
+			cpos = outbackfile->find(':');
+			if (cpos != string::npos)
+			{
+				m_Port = str_to_uint32(outbackfile->substr(cpos + 1));
+
+				*outbackfile = outbackfile->substr(0, cpos);
+			}
 			*outfilename = filename.substr(pos);
 
 			return 0;
@@ -254,8 +267,6 @@ public:
 
 static class FSHttp : public FSNetwork
 {
-protected:
-	int m_Port;
 public:
 	FSHttp() { m_Prefix = "HTTP://"; m_Port = 80; }
 	int load(const string &backfile, const string &filename, shared_ptr<FileBuffer> p, bool async) override;
@@ -303,6 +314,7 @@ int http_load(shared_ptr<HttpStream> http, shared_ptr<FileBuffer> p, string file
 	}
 
 	atomic_fetch_or(&p->m_dataflags, FILEBUFFER_FLAG_LOADED);
+	p->m_request_cv.notify_all();
 
 	ut.type = uuu_notify::NOTIFY_DOWNLOAD_END;
 	ut.str = (char*)filename.c_str();
@@ -314,7 +326,7 @@ int FSHttp::load(const string &backfile, const string &filename, shared_ptr<File
 {
 	shared_ptr<HttpStream> http = make_shared<HttpStream>();
 
-	if (http->HttpGetHeader(backfile, filename, m_Port))
+	if (http->HttpGetHeader(backfile, filename, m_Port, typeid(*this) == typeid(FSHttps)))
 		return -1;
 
 	size_t sz = http->HttpGetFileSize();
@@ -322,6 +334,7 @@ int FSHttp::load(const string &backfile, const string &filename, shared_ptr<File
 	p->resize(sz);
 
 	atomic_fetch_or(&p->m_dataflags, FILEBUFFER_FLAG_KNOWN_SIZE);
+	p->m_request_cv.notify_all();
 
 	if (async)
 	{
@@ -337,6 +350,7 @@ int FSHttp::load(const string &backfile, const string &filename, shared_ptr<File
 
 		p->m_avaible_size = p->m_DataSize;
 		atomic_fetch_or(&p->m_dataflags, FILEBUFFER_FLAG_LOADED);
+		p->m_request_cv.notify_all();
 	}
 
 	return 0;
@@ -551,6 +565,7 @@ int FSZip::load(const string &backfile, const string &filename, shared_ptr<FileB
 			return -1;
 
 		atomic_fetch_or(&p->m_dataflags, FILEBUFFER_FLAG_LOADED);
+		p->m_request_cv.notify_all();
 	}
 	return 0;
 }
@@ -599,6 +614,7 @@ int FSTar::load(const string &backfile, const string &filename, shared_ptr<FileB
 		return -1;
 	p->m_avaible_size = p->m_DataSize;
 	atomic_fetch_or(&p->m_dataflags, FILEBUFFER_FLAG_LOADED);
+	p->m_request_cv.notify_all();
 	return 0;
 }
 
@@ -624,6 +640,7 @@ int FSFat::load(const string &backfile, const string &filename, shared_ptr<FileB
 		return -1;
 
 	atomic_fetch_or(&p->m_dataflags, FILEBUFFER_FLAG_LOADED);
+	p->m_request_cv.notify_all();
 
 	return 0;
 }
@@ -888,6 +905,7 @@ int bz_async_load(string filename, shared_ptr<FileBuffer> p)
 	}
 
 	atomic_fetch_or(&p->m_dataflags, FILEBUFFER_FLAG_KNOWN_SIZE);
+	p->m_request_cv.notify_all();
 
 	{
 		lock_guard<mutex> lock(blks.blk_mutex);
@@ -922,6 +940,7 @@ int bz_async_load(string filename, shared_ptr<FileBuffer> p)
 	if(p->resize(p->m_avaible_size))
 		return -1;
 	atomic_fetch_or(&p->m_dataflags, FILEBUFFER_FLAG_LOADED);
+	p->m_request_cv.notify_all();
 
 	return 0;
 }
@@ -1002,6 +1021,7 @@ int decompress_single_thread(string name,shared_ptr<FileBuffer>p)
 	p->resize(decompressed_size);
 	BZ2_bzDecompressEnd(&strm);
 	atomic_fetch_or(&p->m_dataflags, FILEBUFFER_FLAG_LOADED);
+	p->m_request_cv.notify_all();
 	return 0;
 }
 
@@ -1120,6 +1140,7 @@ int FSGz::load(const string &backfile, const string &filename, shared_ptr<FileBu
 
 		gzclose(fp);
 		atomic_fetch_or(&p->m_dataflags, FILEBUFFER_FLAG_LOADED);
+		p->m_request_cv.notify_all();
 	}
 	return 0;
 }
@@ -1345,7 +1366,10 @@ int FileBuffer::reload(string filename, bool async)
 
 int FileBuffer::request_data(size_t sz)
 {
-	assert(this->m_dataflags & FILEBUFFER_FLAG_KNOWN_SIZE_BIT);
+	std::unique_lock<std::mutex> lck(m_requext_cv_mutex);
+
+	while(!this->m_dataflags & FILEBUFFER_FLAG_KNOWN_SIZE_BIT)
+		m_request_cv.wait(lck);
 
 	if (IsLoaded())
 	{
@@ -1356,7 +1380,7 @@ int FileBuffer::request_data(size_t sz)
 		}
 	}
 
-	std::unique_lock<std::mutex> lck(m_requext_cv_mutex);
+	
 	while ((sz > m_avaible_size) && !IsLoaded())
 	{
 		if (IsError())

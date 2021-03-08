@@ -590,12 +590,12 @@ int FBFlashCmd::run(CmdCtx *ctx)
 
 	if (m_raw2sparse)
 	{
+		size_t block_size = 4096;
+
 		if (getvar.parser((char*)"FB: getvar logical-block-size"))
 			return -1;
-		if (getvar.run(ctx))
-			return -1;
-
-		size_t block_size = str_to_uint32(getvar.m_val);
+		if (!getvar.run(ctx))
+			block_size = str_to_uint32(getvar.m_val);
 
 		if (block_size == 0)
 		{
@@ -625,11 +625,12 @@ int FBFlashCmd::run(CmdCtx *ctx)
 		return flash_raw2sparse(&fb, pdata, block_size, max);
 	}
 
-	shared_ptr<FileBuffer> pdata = get_file_buffer(m_filename);
+	shared_ptr<FileBuffer> pdata = get_file_buffer(m_filename, true);
 	if (pdata == nullptr)
 		return -1;
 
-	if (SparseFile::is_validate_sparse_file(pdata->data(), pdata->size()))
+	pdata->request_data(sizeof(sparse_header));
+	if (SparseFile::is_validate_sparse_file(pdata->data(), sizeof(sparse_header)))
 	{	/* Limited max size to 16M for sparse file to avoid long timeout at read status*/
 		if (max > m_sparse_limit)
 			max = m_sparse_limit;
@@ -637,15 +638,18 @@ int FBFlashCmd::run(CmdCtx *ctx)
 
 	if (pdata->size() <= max)
 	{
+		pdata->request_data(pdata->size());
+
 		if (flash(&fb, pdata->data(), pdata->size()))
 			return -1;
 	}
 	else
 	{
 		size_t pos = 0;
+		pdata->request_data(sizeof(sparse_header));
 		sparse_header * pfile = (sparse_header *)pdata->data();
 
-		if (!SparseFile::is_validate_sparse_file(pdata->data(), pdata->size()))
+		if (!SparseFile::is_validate_sparse_file(pdata->data(), sizeof(sparse_header)))
 		{
 			set_last_err_string("Sparse file magic miss matched");
 			return -1;
@@ -665,12 +669,41 @@ int FBFlashCmd::run(CmdCtx *ctx)
 
 		for(size_t nblk=0; nblk < pfile->total_chunks && pos <= pdata->size(); nblk++)
 		{
+			pdata->request_data(pos+sizeof(chunk_header_t)+sizeof(sparse_header));
+			size_t oldpos = pos;
 			pheader = SparseFile::get_next_chunk(pdata->data(), pos);
+			pdata->request_data(pos);
 
 			size_t sz = sf.push_one_chuck(pheader, pheader + 1);
 			if (sz == pheader->total_sz - sizeof(chunk_header_t))
 			{
 				startblock += pheader->chunk_sz;
+			}
+			else if (sz == 0)
+			{
+				//whole chuck have not push into data.
+				if (flash(&fb, sf.m_data.data(), sf.m_data.size()))
+					return -1;
+
+				sf.init_header(pfile->blk_sz, max / pfile->blk_sz);
+
+				chunk_header_t ct;
+				ct.chunk_type = CHUNK_TYPE_DONT_CARE;
+				ct.chunk_sz = startblock;
+				ct.reserved1 = 0;
+				ct.total_sz = sizeof(ct);
+
+				sz = sf.push_one_chuck(&ct, nullptr);
+
+				/*
+					roll back pos to previous failure chunck and let it push again into new sparse file.
+					can't push it here because next chuck may big size chuck and need split as below else logic.
+				*/
+				pos = oldpos;
+				uuu_notify nt;
+				nt.type = uuu_notify::NOTIFY_TRANS_POS;
+				nt.total = startblock;
+				call_notify(nt);
 			}
 			else
 			{

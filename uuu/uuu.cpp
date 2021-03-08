@@ -204,7 +204,7 @@ int print_cfg(const char *pro, const char * chip, const char * /*compatible*/, u
 int print_udev_rule(const char * /*pro*/, const char * /*chip*/, const char * /*compatible*/,
 	uint16_t vid, uint16_t pid, uint16_t /*bcdmin*/, uint16_t /*bcdmax*/, void * /*p*/)
 {
-	printf("SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"%04x\", ATTRS{idProduct}==\"%04x\", MODE=\"0666\"\n",
+	printf("SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"%04x\", ATTRS{idProduct}==\"%04x\", TAG+=\"uaccess\"\n",
 			vid, pid);
 	return 0;
 }
@@ -760,10 +760,10 @@ int runshell(int shell)
 void print_udev()
 {
 	uuu_for_each_cfg(print_udev_rule, NULL);
-	fprintf(stderr, "\n1: put above udev run into /etc/udev/rules.d/99-uuu.rules\n");
-	fprintf(stderr, "\tsudo sh -c \"uuu -udev >> /etc/udev/rules.d/99-uuu.rules\"\n");
+	fprintf(stderr, "\n1: put above udev run into /etc/udev/rules.d/70-uuu.rules\n");
+	fprintf(stderr, "\tsudo sh -c \"uuu -udev >> /etc/udev/rules.d/70-uuu.rules\"\n");
 	fprintf(stderr, "2: update udev rule\n");
-	fprintf(stderr, "\tsudo udevadm control --reload-rules\n");
+	fprintf(stderr, "\tsudo udevadm control --reload\n");
 }
 
 int print_usb_device(const char *path, const char *chip, const char *pro, uint16_t vid, uint16_t pid, uint16_t bcd, void * /*p*/)
